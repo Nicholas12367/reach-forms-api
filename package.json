@@ -1,0 +1,17 @@
+{
+  "name": "reach-forms-api",
+  "version": "1.0.0",
+  "description": "Form submission relay for the Reach Screens website. Receives POSTs and emails info@reachscreens.ca via Resend.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.1",
+    "resend": "^4.0.1"
+  }
+}
