@@ -190,28 +190,95 @@ async function sendEmailWithRetry(row, maxAttempts = 3) {
   return { ok: false, error: lastError, attempts: maxAttempts };
 }
 
+function htmlEscape(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+function confirmationHtml(row) {
+  const firstName = (row.name || '').split(' ')[0] || row.name || 'there';
+  const safeName = htmlEscape(firstName);
+  const safeMessage = htmlEscape(row.message || '').replace(/\n/g, '<br>');
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>We got your idea — Reach Screens</title></head>
+<body style="margin:0; padding:0; background-color:#f4f6f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; color:#1a2c4a; -webkit-font-smoothing:antialiased;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f6f9; padding: 32px 16px;">
+  <tr><td align="center">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow: 0 2px 8px rgba(10,22,40,0.06);">
+      <tr>
+        <td style="background: linear-gradient(135deg, #0E1D33 0%, #1A2439 100%); padding: 32px 32px 28px; text-align:left;">
+          <img src="https://reach.reachscreens.ca/assets/logo-white.png" alt="Reach Screens" width="200" style="display:block; max-width:200px; width:200px; height:auto; border:0; outline:none; text-decoration:none;">
+          <h1 style="margin: 18px 0 0 0; font-size: 26px; line-height:1.2; font-weight:700; color:#ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;">
+            We got your idea.
+          </h1>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding: 32px;">
+          <p style="margin: 0 0 18px 0; font-size: 16px; line-height:1.55; color: #1a2c4a;">Hi ${safeName},</p>
+          <p style="margin: 0 0 18px 0; font-size: 16px; line-height:1.55; color: #1a2c4a;">
+            Thanks for reaching out. One of us will be in touch within <strong>48 hours</strong> with a plan and a price tailored to what you want to promote.
+          </p>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 24px 0;">
+            <tr><td style="background-color: #f4f8fb; border-left: 3px solid #5CE0D2; padding: 16px 20px; border-radius: 6px;">
+              <div style="font-size: 11px; letter-spacing: 0.1em; text-transform:uppercase; color: #6b7890; font-weight:600; margin-bottom: 6px;">Your idea</div>
+              <div style="font-size: 15px; line-height: 1.55; color: #1a2c4a;">${safeMessage}</div>
+            </td></tr>
+          </table>
+          <p style="margin: 0 0 18px 0; font-size: 16px; line-height:1.55; color: #1a2c4a;">
+            If anything's urgent, just reply to this email or give us a call at <a href="tel:3065143752" style="color:#0e7c70; font-weight:600; text-decoration:none;">306-514-3752</a>.
+          </p>
+          <p style="margin: 0; font-size: 16px; line-height:1.55; color: #1a2c4a;">— The Reach Screens team</p>
+        </td>
+      </tr>
+      <tr>
+        <td style="background-color: #0E1D33; padding: 28px 32px; color: #9BA8BF;">
+          <div style="font-size: 16px; font-weight: 700; color:#ffffff; margin-bottom: 6px;">Reach Screens</div>
+          <div style="margin-bottom: 14px; font-size: 13px; color:#9BA8BF;">Local digital advertising in Lloydminster, AB</div>
+          <div style="margin-bottom: 4px; font-size:14px;"><a href="tel:3065143752" style="color: #5CE0D2; text-decoration: none;">306-514-3752</a></div>
+          <div style="margin-bottom: 4px; font-size:14px;"><a href="mailto:info@reachscreens.ca" style="color: #5CE0D2; text-decoration: none;">info@reachscreens.ca</a></div>
+          <div style="margin-bottom: 4px; font-size:14px;"><a href="https://reachscreens.ca" style="color: #5CE0D2; text-decoration: none;">reachscreens.ca</a></div>
+          <div style="margin-bottom: 14px; font-size: 13px; color:#6b7890;">P.O. Box 11238<br>Lloydminster, AB T9V 3B5</div>
+          <div style="font-size: 11px; color: #6b7890; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.08);">© 2026 Reach Screens. You're receiving this because you submitted an idea on reachscreens.ca.</div>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>`;
+}
+
 async function sendConfirmation(row) {
   if (!process.env.RESEND_API_KEY) return false;
   if (!isEmail(row.email)) return false;
   const resend = new Resend(process.env.RESEND_API_KEY);
-  const fromAddr = process.env.RESEND_FROM || 'Reach Screens <noreply@reachscreens.ca>';
+  const fromAddr = process.env.RESEND_CONFIRM_FROM || 'Reach Screens <hello@reachscreens.ca>';
+  const replyTo = process.env.RESEND_TO || 'info@reachscreens.ca';
+  const firstName = (row.name || '').split(' ')[0] || row.name || 'there';
+  const text =
+`Hi ${firstName},
+
+Thanks for reaching out to Reach Screens. We've received your idea and one of us will be in touch within 48 hours with a plan and a price tailored to what you want to promote.
+
+Your idea:
+${row.message}
+
+If anything's urgent, just reply to this email or call 306-514-3752.
+
+— The Reach Screens team
+
+—
+Reach Screens — Local digital advertising in Lloydminster, AB
+306-514-3752 · info@reachscreens.ca · reachscreens.ca
+P.O. Box 11238, Lloydminster, AB T9V 3B5
+`;
   try {
     const result = await resend.emails.send({
       from: fromAddr,
       to: row.email,
+      replyTo,
       subject: 'We got your idea — Reach Screens',
-      text:
-`Hi ${row.name.split(' ')[0] || row.name},
-
-Thanks for reaching out to Reach Screens. We've received your idea and one of us will be in touch within 48 hours with a plan and a price tailored to what you want to promote.
-
-Your message:
-${row.message}
-
-If anything urgent, just reply to this email or call (306) 514-3752.
-
-— The Reach Screens team
-`,
+      text,
+      html: confirmationHtml(row),
     });
     return !result.error;
   } catch {
