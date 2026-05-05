@@ -47,6 +47,7 @@ If every channel fails, the submission still sits in the DB and shows up red in 
 |---|---|---|
 | `RESEND_FROM` | `Reach Screens Site <noreply@reachscreens.ca>` | Sender address (must be on a verified domain in Resend) |
 | `RESEND_TO` | `info@reachscreens.ca` | Where notification emails land |
+| `HUBSPOT_PRIVATE_APP_TOKEN` | none | Real-time HubSpot CRM contact sync. Token from a HubSpot Private App with `crm.objects.contacts.read/write` and `crm.objects.companies.read/write` scopes. Each submission upserts a contact (deduped by email) and attaches a Note engagement with the full message + metadata to the contact's HubSpot timeline. |
 | `SLACK_WEBHOOK_URL` | none | Slack/Discord/Mattermost webhook URL — second notification channel |
 | `SMS_EMAIL` | none | Email-to-SMS carrier gateway. Set to e.g. `3065551234@txt.bell.ca` to get free SMS via your carrier — no Twilio account needed. Common Canadian gateways: Bell `@txt.bell.ca`, Rogers `@sms.rogers.com`, Telus/Koodo `@msg.telus.com`, Fido `@fido.ca`, Virgin `@vmobile.ca`, SaskTel `@sms.sasktel.com`, Freedom `@txt.freedommobile.ca`. |
 | `TWILIO_ACCOUNT_SID` | none | https://www.twilio.com/console |

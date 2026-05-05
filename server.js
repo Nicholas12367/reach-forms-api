@@ -74,7 +74,8 @@ const insertStmt = db.prepare(`
 const updateDeliveryStmt = db.prepare(`
   UPDATE submissions SET
     email_sent = ?, email_attempts = ?, email_last_error = ?,
-    slack_sent = ?, sms_sent = ?, confirmation_sent = ?
+    slack_sent = ?, sms_sent = ?, confirmation_sent = ?,
+    hubspot_synced = ?, hubspot_contact_id = ?
   WHERE id = ?
 `);
 
@@ -115,6 +116,7 @@ app.get('/health', (_req, res) => {
     hasSlack: Boolean(process.env.SLACK_WEBHOOK_URL),
     hasTwilio: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
     hasSmsEmail: Boolean(process.env.SMS_EMAIL),
+    hasHubspot: Boolean(process.env.HUBSPOT_PRIVATE_APP_TOKEN),
     submissions: counts,
   });
 });
@@ -375,6 +377,77 @@ async function sendSms(row) {
   return false;
 }
 
+// ---------- HubSpot real-time contact sync --------------------------------
+async function sendHubspot(row) {
+  const token = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
+  if (!token) return { ok: false, contactId: null, error: 'no token' };
+
+  const presence = PRESENCE_LABEL[row.package] || row.package || '';
+  const nameParts = (row.name || '').trim().split(/\s+/);
+  const firstname = nameParts[0] || '';
+  const lastname = nameParts.slice(1).join(' ') || '';
+
+  // Step 1: Upsert contact by email — creates new or updates existing.
+  const contactProps = { email: row.email };
+  if (firstname) contactProps.firstname = firstname;
+  if (lastname) contactProps.lastname = lastname;
+  if (row.phone) contactProps.phone = row.phone;
+  if (row.business) contactProps.company = row.business;
+
+  let contactId = null;
+  try {
+    const upsertRes = await fetch('https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        inputs: [{ idProperty: 'email', id: row.email, properties: contactProps }],
+      }),
+    });
+    if (!upsertRes.ok) {
+      const errBody = await upsertRes.text();
+      return { ok: false, contactId: null, error: `upsert ${upsertRes.status}: ${errBody.slice(0, 200)}` };
+    }
+    const upsertJson = await upsertRes.json();
+    contactId = upsertJson.results?.[0]?.id || null;
+    if (!contactId) return { ok: false, contactId: null, error: 'upsert returned no contact id' };
+  } catch (err) {
+    return { ok: false, contactId: null, error: `upsert exception: ${err?.message || err}` };
+  }
+
+  // Step 2: Attach a Note engagement with the full message + metadata, so
+  // every submission shows up in the contact's HubSpot timeline.
+  // Failure here is non-fatal — the contact itself is the primary win.
+  try {
+    const lines = [
+      `<p><strong>Inquiry type:</strong> ${row.type === 'host' ? 'Wants to host a screen' : 'Wants to advertise'}</p>`,
+    ];
+    if (presence) lines.push(`<p><strong>Presence preference:</strong> ${htmlEscape(presence)}</p>`);
+    if (row.locations) lines.push(`<p><strong>Selected location IDs:</strong> ${htmlEscape(row.locations)}</p>`);
+    if (row.venue) lines.push(`<p><strong>Venue type:</strong> ${htmlEscape(row.venue)}</p>`);
+    if (row.address) lines.push(`<p><strong>Business address:</strong> ${htmlEscape(row.address)}</p>`);
+    lines.push(`<p><strong>Idea / Message:</strong></p>`);
+    lines.push(`<p>${htmlEscape(row.message || '').replace(/\n/g, '<br>')}</p>`);
+    lines.push(`<hr><p><em>Submitted via reachscreens.ca contact form (id ${row.id})</em></p>`);
+
+    await fetch('https://api.hubapi.com/crm/v3/objects/notes', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        properties: {
+          hs_note_body: lines.join(''),
+          hs_timestamp: new Date().toISOString(),
+        },
+        associations: [{
+          to: { id: contactId },
+          types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 202 }],
+        }],
+      }),
+    });
+  } catch {}
+
+  return { ok: true, contactId, error: null };
+}
+
 // ---------- /submit -------------------------------------------------------
 app.post('/submit', async (req, res) => {
   try {
@@ -409,11 +482,12 @@ app.post('/submit', async (req, res) => {
     res.json({ ok: true, id: row.id });
 
     // STEP 3: deliver via every channel in parallel, in the background.
-    const [emailRes, slackRes, smsRes, confirmRes] = await Promise.allSettled([
+    const [emailRes, slackRes, smsRes, confirmRes, hubspotRes] = await Promise.allSettled([
       sendEmailWithRetry(row),
       sendSlack(row),
       sendSms(row),
       sendConfirmation(row),
+      sendHubspot(row),
     ]);
 
     const emailOk = emailRes.status === 'fulfilled' && emailRes.value.ok;
@@ -422,12 +496,18 @@ app.post('/submit', async (req, res) => {
     const slackOk = slackRes.status === 'fulfilled' && slackRes.value === true;
     const smsOk = smsRes.status === 'fulfilled' && smsRes.value === true;
     const confirmOk = confirmRes.status === 'fulfilled' && confirmRes.value === true;
+    const hubspotOk = hubspotRes.status === 'fulfilled' && hubspotRes.value?.ok === true;
+    const hubspotContactId = hubspotRes.status === 'fulfilled' ? (hubspotRes.value?.contactId || null) : null;
+    if (hubspotRes.status === 'fulfilled' && !hubspotOk && hubspotRes.value?.error) {
+      console.error(`[id ${row.id}] HubSpot sync failed: ${hubspotRes.value.error}`);
+    }
 
     updateDeliveryStmt.run(
       emailOk ? 1 : 0, emailAttempts, emailErr,
       slackOk ? 1 : 0,
       smsOk ? 1 : 0,
       confirmOk ? 1 : 0,
+      hubspotOk ? 1 : 0, hubspotContactId,
       row.id,
     );
 
