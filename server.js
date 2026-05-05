@@ -58,9 +58,14 @@ db.exec(`
     email_last_error TEXT,
     slack_sent INTEGER DEFAULT 0,
     sms_sent INTEGER DEFAULT 0,
-    confirmation_sent INTEGER DEFAULT 0
+    confirmation_sent INTEGER DEFAULT 0,
+    hubspot_synced INTEGER DEFAULT 0,
+    hubspot_contact_id TEXT
   );
 `);
+// Lightweight migrations for older deployments that already have the table:
+try { db.exec(`ALTER TABLE submissions ADD COLUMN hubspot_synced INTEGER DEFAULT 0`); } catch {}
+try { db.exec(`ALTER TABLE submissions ADD COLUMN hubspot_contact_id TEXT`); } catch {}
 
 const insertStmt = db.prepare(`
   INSERT INTO submissions (type, name, business, email, phone, package, locations, venue, address, message)
@@ -99,7 +104,9 @@ app.get('/health', (_req, res) => {
     SELECT
       COUNT(*) AS total,
       SUM(CASE WHEN email_sent = 1 THEN 1 ELSE 0 END) AS emailed,
-      SUM(CASE WHEN email_sent = 0 THEN 1 ELSE 0 END) AS pending
+      SUM(CASE WHEN email_sent = 0 THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN hubspot_synced = 1 THEN 1 ELSE 0 END) AS hubspot_synced,
+      SUM(CASE WHEN hubspot_synced = 0 THEN 1 ELSE 0 END) AS hubspot_pending
     FROM submissions
   `).get();
   res.json({
@@ -482,7 +489,7 @@ app.get('/admin', basicAuth, (_req, res) => {
 <table>
 <thead><tr>
 <th>ID</th><th>When</th><th>Type</th><th>Name</th><th>Business</th><th>Contact</th>
-<th>Presence</th><th>Idea</th><th>Em</th><th>Sl</th><th>SMS</th><th>Cf</th>
+<th>Presence</th><th>Idea</th><th>Em</th><th>Sl</th><th>SMS</th><th>Cf</th><th>Hs</th>
 </tr></thead><tbody>
 ${rows.map(r => `
 <tr>
@@ -498,6 +505,7 @@ ${rows.map(r => `
   <td class="${r.slack_sent ? 'ok' : 'muted'}">${fmt(r.slack_sent)}</td>
   <td class="${r.sms_sent ? 'ok' : 'muted'}">${fmt(r.sms_sent)}</td>
   <td class="${r.confirmation_sent ? 'ok' : 'muted'}">${fmt(r.confirmation_sent)}</td>
+  <td class="${r.hubspot_synced ? 'ok' : 'muted'}" title="${escape(r.hubspot_contact_id || '')}">${fmt(r.hubspot_synced)}</td>
 </tr>`).join('')}
 </tbody></table>
 </body></html>`;
@@ -508,6 +516,32 @@ ${rows.map(r => `
 function escape(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
+
+// ---------- /admin/hubspot-pending (protected) — list rows not yet synced to HubSpot ----------
+app.get('/admin/hubspot-pending', basicAuth, (_req, res) => {
+  const rows = db.prepare(`
+    SELECT id, created_at, type, name, business, email, phone, package, message
+    FROM submissions
+    WHERE hubspot_synced = 0
+    ORDER BY id ASC
+    LIMIT 100
+  `).all();
+  res.json({ ok: true, count: rows.length, submissions: rows });
+});
+
+// ---------- /admin/hubspot-mark-synced (protected) — mark a submission as synced ----------
+app.post('/admin/hubspot-mark-synced', basicAuth, (req, res) => {
+  const id = parseInt(req.body?.id, 10);
+  const contactId = String(req.body?.contact_id || '').slice(0, 64);
+  if (!id || !contactId) {
+    return res.status(400).json({ ok: false, error: 'id and contact_id required' });
+  }
+  const result = db.prepare(`
+    UPDATE submissions SET hubspot_synced = 1, hubspot_contact_id = ?
+    WHERE id = ?
+  `).run(contactId, id);
+  res.json({ ok: true, updated: result.changes, id, contact_id: contactId });
+});
 
 // ---------- /admin/retry (protected) — retry pending email sends ---------
 app.post('/admin/retry', basicAuth, async (_req, res) => {
