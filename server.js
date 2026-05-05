@@ -205,9 +205,9 @@ function confirmationHtml(row) {
   <tr><td align="center">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px; width:100%; background-color:#ffffff; border-radius:12px; overflow:hidden; box-shadow: 0 2px 8px rgba(10,22,40,0.06);">
       <tr>
-        <td style="background: linear-gradient(135deg, #0E1D33 0%, #1A2439 100%); padding: 32px 32px 28px; text-align:left;">
-          <img src="https://reach.reachscreens.ca/assets/logo-white.png" alt="Reach Screens" width="200" style="display:block; max-width:200px; width:200px; height:auto; border:0; outline:none; text-decoration:none;">
-          <h1 style="margin: 18px 0 0 0; font-size: 26px; line-height:1.2; font-weight:700; color:#ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;">
+        <td style="background-color:#ffffff; padding: 32px 32px 24px; text-align:left; border-bottom: 1px solid #e6ecf5;">
+          <img src="https://reach.reachscreens.ca/assets/logos/reach-screens-watermark.png" alt="Reach Screens" width="220" style="display:block; max-width:220px; width:220px; height:auto; border:0; outline:none; text-decoration:none;">
+          <h1 style="margin: 22px 0 0 0; font-size: 26px; line-height:1.2; font-weight:700; color:#0A1628; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;">
             We got your idea.
           </h1>
         </td>
