@@ -107,6 +107,7 @@ app.get('/health', (_req, res) => {
     hasResend: Boolean(process.env.RESEND_API_KEY),
     hasSlack: Boolean(process.env.SLACK_WEBHOOK_URL),
     hasTwilio: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+    hasSmsEmail: Boolean(process.env.SMS_EMAIL),
     submissions: counts,
   });
 });
@@ -255,26 +256,49 @@ async function sendSlack(row) {
 }
 
 async function sendSms(row) {
+  const presence = PRESENCE_LABEL[row.package] || row.package || '';
+  const body = `Reach Screens: ${row.type === 'host' ? 'host' : 'ad'} inquiry from ${row.name} (${row.email})${presence ? ` — ${presence}` : ''}`;
+  const text = body.slice(0, 320);
+
+  // Path 1: SMS via carrier email gateway (no Twilio needed).
+  // Set SMS_EMAIL to e.g. "3065551234@txt.bell.ca" — Resend sends a tiny
+  // email there, the carrier gateway converts it to SMS. Free.
+  if (process.env.SMS_EMAIL && process.env.RESEND_API_KEY) {
+    try {
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      const fromAddr = process.env.RESEND_FROM || 'Reach Screens <noreply@reachscreens.ca>';
+      const result = await resend.emails.send({
+        from: fromAddr,
+        to: process.env.SMS_EMAIL,
+        subject: 'Reach Screens',  // many gateways prepend subject; keep it short
+        text,
+      });
+      if (!result.error) return true;
+    } catch {}
+  }
+
+  // Path 2: Twilio SMS API (real SMS, costs ~1¢/msg).
   const sid = process.env.TWILIO_ACCOUNT_SID;
   const token = process.env.TWILIO_AUTH_TOKEN;
   const from = process.env.TWILIO_FROM;
   const to = process.env.TWILIO_TO;
-  if (!sid || !token || !from || !to) return false;
-  const presence = PRESENCE_LABEL[row.package] || row.package || '';
-  const body = `Reach Screens: ${row.type === 'host' ? 'host' : 'ad'} inquiry from ${row.name} (${row.email})${presence ? ` — ${presence}` : ''}`;
-  try {
-    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ From: from, To: to, Body: body.slice(0, 320) }).toString(),
-    });
-    return res.ok;
-  } catch {
-    return false;
+  if (sid && token && from && to) {
+    try {
+      const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64'),
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ From: from, To: to, Body: text }).toString(),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
+
+  return false;
 }
 
 // ---------- /submit -------------------------------------------------------
