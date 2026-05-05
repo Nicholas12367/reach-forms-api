@@ -1,7 +1,7 @@
 {
   "name": "reach-forms-api",
-  "version": "1.0.0",
-  "description": "Form submission relay for the Reach Screens website. Receives POSTs and emails info@reachscreens.ca via Resend.",
+  "version": "2.0.0",
+  "description": "Form relay for Reach Screens. Persists submissions, sends via Resend + Slack + SMS, retries on failure, includes /admin dashboard.",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -11,6 +11,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "better-sqlite3": "^11.5.0",
     "express": "^4.21.1",
     "resend": "^4.0.1"
   }
