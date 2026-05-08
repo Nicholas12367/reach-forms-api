@@ -84,8 +84,10 @@ const ALLOWED_ORIGINS = new Set([
   'https://reach.reachscreens.ca',
   'https://reachscreens.ca',
   'https://www.reachscreens.ca',
+  'https://reach2.reachscreens.ca',
   'http://localhost:8090',
   'http://localhost:3000',
+  'http://localhost:8091',
 ]);
 app.use((req, res, next) => {
   const origin = req.headers.origin;
