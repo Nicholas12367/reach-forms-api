@@ -67,68 +67,6 @@ db.exec(`
 try { db.exec(`ALTER TABLE submissions ADD COLUMN hubspot_synced INTEGER DEFAULT 0`); } catch {}
 try { db.exec(`ALTER TABLE submissions ADD COLUMN hubspot_contact_id TEXT`); } catch {}
 
-// ---------- Analytics events ---------------------------------------------
-db.exec(`
-  CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT DEFAULT CURRENT_TIMESTAMP,
-    session_id TEXT,
-    event_type TEXT,
-    path TEXT,
-    referrer TEXT,
-    label TEXT,
-    value REAL,
-    meta TEXT,
-    ip_hash TEXT,
-    user_agent TEXT,
-    device TEXT,
-    country TEXT
-  );
-  CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(event_type, ts);
-  CREATE INDEX IF NOT EXISTS idx_events_session_ts ON events(session_id, ts);
-  CREATE INDEX IF NOT EXISTS idx_events_path_ts ON events(path, ts);
-`);
-const insertEventStmt = db.prepare(`
-  INSERT INTO events (session_id, event_type, path, referrer, label, value, meta, ip_hash, user_agent, device, country)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-const KNOWN_EVENT_TYPES = new Set([
-  'pageview',
-  'click',
-  'scroll_depth',
-  'section_dwell',
-  'form_view',
-  'form_submit',
-  'outbound_click',
-  'session_end',
-]);
-
-function hashIp(raw) {
-  if (!raw) return null;
-  const ip = String(raw).split(',')[0].trim();
-  // Truncate IPv4 to /24, IPv6 to /48 — enough for "unique visitor" without storing the exact address.
-  if (ip.includes(':')) {
-    const parts = ip.split(':');
-    return parts.slice(0, 3).join(':') + '::/48';
-  }
-  const parts = ip.split('.');
-  if (parts.length === 4) return parts.slice(0, 3).join('.') + '.0/24';
-  return ip;
-}
-
-function deviceFromUA(ua) {
-  if (!ua) return 'unknown';
-  const s = String(ua).toLowerCase();
-  if (/ipad|tablet/.test(s)) return 'tablet';
-  if (/mobile|iphone|android/.test(s)) return 'mobile';
-  return 'desktop';
-}
-
-function clientIp(req) {
-  return req.headers['x-forwarded-for'] || req.socket.remoteAddress || null;
-}
-
 const insertStmt = db.prepare(`
   INSERT INTO submissions (type, name, business, email, phone, package, locations, venue, address, message)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -586,53 +524,6 @@ app.post('/submit', async (req, res) => {
   }
 });
 
-// ---------- /track --------------------------------------------------------
-// Single-beacon endpoint. Accepts either one event or an array of events
-// (the client batches events on visibilitychange/pagehide so multiple
-// scroll/dwell signals arrive in one request without keeping the page open).
-app.post('/track', (req, res) => {
-  try {
-    const body = req.body || {};
-    const events = Array.isArray(body.events) ? body.events
-                   : Array.isArray(body) ? body
-                   : [body];
-    if (!events.length) return res.json({ ok: true, recorded: 0 });
-
-    const ip = hashIp(clientIp(req));
-    const ua = String(req.headers['user-agent'] || '').slice(0, 400);
-    const device = deviceFromUA(ua);
-    const country = req.headers['cf-ipcountry'] || req.headers['x-vercel-ip-country'] || null;
-
-    let recorded = 0;
-    const insertMany = db.transaction((rows) => {
-      for (const ev of rows) {
-        if (!ev || !KNOWN_EVENT_TYPES.has(ev.type)) continue;
-        const meta = ev.meta && typeof ev.meta === 'object' ? JSON.stringify(ev.meta).slice(0, 1000) : null;
-        insertEventStmt.run(
-          String(ev.sid || '').slice(0, 64) || null,
-          ev.type,
-          String(ev.path || '').slice(0, 300) || null,
-          String(ev.ref || '').slice(0, 300) || null,
-          String(ev.label || '').slice(0, 200) || null,
-          Number.isFinite(ev.value) ? ev.value : null,
-          meta,
-          ip,
-          ua,
-          device,
-          country,
-        );
-        recorded++;
-      }
-    });
-    insertMany(events);
-
-    res.json({ ok: true, recorded });
-  } catch (err) {
-    console.error('Track error:', err);
-    if (!res.headersSent) res.status(500).json({ ok: false, error: 'Internal error' });
-  }
-});
-
 // ---------- /admin (protected) -------------------------------------------
 function basicAuth(req, res, next) {
   const adminUser = process.env.ADMIN_USER || 'admin';
@@ -653,444 +544,55 @@ function basicAuth(req, res, next) {
   next();
 }
 
-// ---------- Admin shell --------------------------------------------------
-const NAV_LINKS = [
-  { href: '/admin',             label: 'Overview' },
-  { href: '/admin/submissions', label: 'Submissions' },
-  { href: '/admin/analytics',   label: 'Analytics' },
-  { href: '/admin/sessions',    label: 'Sessions' },
-];
-
-function adminShell(active, title, body) {
-  const navHtml = NAV_LINKS.map(l => {
-    const cls = l.href === active ? 'nav-link active' : 'nav-link';
-    return `<a class="${cls}" href="${l.href}">${l.label}</a>`;
-  }).join('');
-  return `<!doctype html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escape(title)} — Reach Screens Admin</title>
-<style>
-  :root {
-    --bg: #0a1628;
-    --panel: #0e1d33;
-    --panel-2: #122545;
-    --line: rgba(255,255,255,0.08);
-    --text: #e6ecf5;
-    --muted: #8ea0bd;
-    --dim: #6b7890;
-    --cyan: #5CE0D2;
-    --red: #E11D2C;
-    --ok: #5CE0D2;
-    --fail: #ff6b6b;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.45; }
-  .shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
-  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 22px 14px; position: sticky; top: 0; align-self: start; height: 100vh; }
-  aside h2 { font-size: 13px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--cyan); margin: 0 0 18px 8px; }
-  .nav-link { display: block; padding: 10px 12px; border-radius: 8px; color: var(--muted); text-decoration: none; font-size: 14px; margin-bottom: 2px; }
-  .nav-link:hover { background: rgba(255,255,255,0.04); color: var(--text); }
-  .nav-link.active { background: var(--red); color: #fff; font-weight: 600; }
-  main { padding: 28px 32px 56px; max-width: 1280px; }
-  h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
-  .subtitle { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 28px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
-  .card-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 6px; }
-  .card-value { font-size: 28px; font-weight: 600; margin: 0; }
-  .card-sub { font-size: 12px; color: var(--dim); margin-top: 6px; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
-  .panel h3 { margin: 0 0 14px; font-size: 14px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
-  .grid-2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
-  @media (max-width: 980px) { .grid-2 { grid-template-columns: 1fr; } .shell { grid-template-columns: 1fr; } aside { position: static; height: auto; } }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { background: rgba(255,255,255,0.03); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; font-size: 10.5px; color: var(--muted); }
-  tr:hover td { background: rgba(92,224,210,0.04); }
-  .ok { color: var(--ok); } .fail { color: var(--fail); } .muted { color: var(--muted); } .dim { color: var(--dim); }
-  details summary { cursor: pointer; }
-  pre { white-space: pre-wrap; background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 6px; font-size: 12px; max-width: 520px; }
-  .range-bar { display: inline-flex; gap: 2px; background: var(--panel-2); padding: 3px; border-radius: 999px; margin-bottom: 16px; }
-  .range-bar a { padding: 6px 14px; font-size: 12px; color: var(--muted); text-decoration: none; border-radius: 999px; }
-  .range-bar a.active { background: var(--red); color: #fff; font-weight: 600; }
-  .bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
-  .bar-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), #2FA9E8); }
-  .bar-row { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 12px; align-items: center; margin: 6px 0; font-size: 13px; }
-  .bar-row .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bar-row .val { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .spark { display: block; width: 100%; height: 64px; }
-  .empty { color: var(--dim); padding: 30px; text-align: center; font-size: 13px; border: 1px dashed var(--line); border-radius: 10px; }
-  .pill { display: inline-block; padding: 2px 8px; font-size: 11px; border-radius: 999px; background: rgba(92,224,210,0.12); color: var(--cyan); letter-spacing: 0.04em; text-transform: uppercase; }
-</style>
-</head><body>
-<div class="shell">
-  <aside>
-    <h2>Reach Admin</h2>
-    ${navHtml}
-    <div style="margin-top:22px; padding: 0 8px; font-size: 11px; color: var(--dim);">forms-api.reachscreens.ca</div>
-  </aside>
-  <main>${body}</main>
-</div>
-</body></html>`;
-}
-
-// ---------- Analytics helpers --------------------------------------------
-const RANGE_DAYS = { '24h': 1, '7d': 7, '30d': 30, '90d': 90 };
-
-function rangeFromQuery(q) {
-  const key = (q && typeof q.range === 'string' && RANGE_DAYS[q.range]) ? q.range : '7d';
-  return { key, days: RANGE_DAYS[key] };
-}
-
-function eventsInRange(days) {
-  return db.prepare(`
-    SELECT * FROM events
-    WHERE ts >= datetime('now', ?)
-    ORDER BY ts DESC
-  `).all(`-${days} days`);
-}
-
-function rangeBar(active) {
-  return `<div class="range-bar">${Object.keys(RANGE_DAYS).map(k =>
-    `<a class="${k === active ? 'active' : ''}" href="?range=${k}">${k}</a>`).join('')}</div>`;
-}
-
-function sparkline(points) {
-  if (!points.length) return '<svg class="spark"></svg>';
-  const w = 320, h = 64, pad = 4;
-  const max = Math.max(1, ...points.map(p => p.v));
-  const stepX = (w - pad * 2) / Math.max(1, points.length - 1);
-  const coords = points.map((p, i) => {
-    const x = pad + i * stepX;
-    const y = h - pad - ((p.v / max) * (h - pad * 2));
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-  const linePath = `M ${coords.join(' L ')}`;
-  const areaPath = `${linePath} L ${(pad + (points.length - 1) * stepX).toFixed(1)},${h - pad} L ${pad},${h - pad} Z`;
-  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-    <path d="${areaPath}" fill="rgba(92,224,210,0.18)"/>
-    <path d="${linePath}" fill="none" stroke="#5CE0D2" stroke-width="1.8"/>
-  </svg>`;
-}
-
-function bucketByDay(rows, days) {
-  // Build a {YYYY-MM-DD: count} bucket spanning the range.
-  const buckets = new Map();
-  const now = new Date();
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now.getTime() - i * 86400000);
-    buckets.set(d.toISOString().slice(0, 10), 0);
-  }
-  for (const r of rows) {
-    const day = (r.ts || '').slice(0, 10);
-    if (buckets.has(day)) buckets.set(day, buckets.get(day) + 1);
-  }
-  return [...buckets.entries()].map(([day, v]) => ({ day, v }));
-}
-
-function topByLabel(rows, eventType, limit = 10) {
-  const counts = new Map();
-  for (const r of rows) {
-    if (r.event_type !== eventType) continue;
-    const k = r.label || '(none)';
-    counts.set(k, (counts.get(k) || 0) + 1);
-  }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
-}
-
-function barListHtml(items) {
-  if (!items.length) return '<div class="empty">Nothing tracked yet for this range.</div>';
-  const max = Math.max(...items.map(([, v]) => v));
-  return items.map(([k, v]) => {
-    const pct = max > 0 ? (v / max) * 100 : 0;
-    return `<div>
-      <div class="bar-row"><span class="lbl">${escape(k)}</span><span class="val">${v.toLocaleString()}</span></div>
-      <div class="bar"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
-    </div>`;
-  }).join('');
-}
-
-// ---------- /admin (Overview) --------------------------------------------
-app.get('/admin', basicAuth, (req, res) => {
-  const { key: rangeKey, days } = rangeFromQuery(req.query);
-  const rows = eventsInRange(days);
-  const totalPageviews = rows.filter(r => r.event_type === 'pageview').length;
-  const uniqueVisitors = new Set(rows.map(r => r.session_id).filter(Boolean)).size;
-  const totalClicks = rows.filter(r => r.event_type === 'click').length;
-  const submissionCount = db.prepare(
-    `SELECT COUNT(*) AS n FROM submissions WHERE created_at >= datetime('now', ?)`
-  ).get(`-${days} days`).n;
-  const pageviewsByDay = bucketByDay(rows.filter(r => r.event_type === 'pageview'), days);
-  const submissionsAllTime = db.prepare(`SELECT COUNT(*) AS n FROM submissions`).get().n;
-  const eventsAllTime = db.prepare(`SELECT COUNT(*) AS n FROM events`).get().n;
-
-  const channels = {
-    resend: Boolean(process.env.RESEND_API_KEY),
-    smsEmail: Boolean(process.env.SMS_EMAIL),
-    hubspot: Boolean(process.env.HUBSPOT_PRIVATE_APP_TOKEN),
-    slack: Boolean(process.env.SLACK_WEBHOOK_URL),
-  };
-  const channelBadge = (ok, name) =>
-    `<span class="pill" style="background:${ok ? 'rgba(92,224,210,0.12)' : 'rgba(255,107,107,0.12)'};color:${ok ? 'var(--ok)' : 'var(--fail)'}">${name} ${ok ? '✓' : '·'}</span>`;
-
-  const body = `
-    <h1>Overview</h1>
-    <p class="subtitle">A snapshot of traffic and lead flow across reachscreens.ca.</p>
-    ${rangeBar(rangeKey)}
-    <div class="cards">
-      <div class="card"><p class="card-label">Pageviews</p><p class="card-value">${totalPageviews.toLocaleString()}</p><p class="card-sub">in the last ${days}d</p></div>
-      <div class="card"><p class="card-label">Unique sessions</p><p class="card-value">${uniqueVisitors.toLocaleString()}</p><p class="card-sub">distinct visitors</p></div>
-      <div class="card"><p class="card-label">Clicks tracked</p><p class="card-value">${totalClicks.toLocaleString()}</p><p class="card-sub">on the live site</p></div>
-      <div class="card"><p class="card-label">Form submissions</p><p class="card-value">${submissionCount.toLocaleString()}</p><p class="card-sub">${submissionsAllTime.toLocaleString()} all-time</p></div>
-    </div>
-    <div class="panel">
-      <h3>Pageviews — last ${days} days</h3>
-      ${sparkline(pageviewsByDay)}
-      <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--dim); margin-top:6px;">
-        <span>${pageviewsByDay[0]?.day || ''}</span>
-        <span>${pageviewsByDay[pageviewsByDay.length - 1]?.day || ''}</span>
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="panel">
-        <h3>Delivery channels</h3>
-        <div style="display:flex; flex-wrap:wrap; gap:8px;">
-          ${channelBadge(channels.resend, 'Email (Resend)')}
-          ${channelBadge(channels.hubspot, 'HubSpot')}
-          ${channelBadge(channels.smsEmail, 'SMS via email')}
-          ${channelBadge(channels.slack, 'Slack')}
-        </div>
-        <p class="card-sub" style="margin-top:14px;">${eventsAllTime.toLocaleString()} analytics events recorded all-time.</p>
-      </div>
-      <div class="panel">
-        <h3>Quick links</h3>
-        <p style="margin:0; font-size:13px;"><a style="color:var(--cyan)" href="/admin/submissions">→ View submissions</a></p>
-        <p style="margin:6px 0 0; font-size:13px;"><a style="color:var(--cyan)" href="/admin/analytics?range=${rangeKey}">→ Open analytics</a></p>
-        <p style="margin:6px 0 0; font-size:13px;"><a style="color:var(--cyan)" href="/admin/sessions?range=${rangeKey}">→ Recent sessions</a></p>
-        <p style="margin:6px 0 0; font-size:13px;"><a style="color:var(--cyan)" href="/health">→ Health JSON</a></p>
-      </div>
-    </div>
-  `;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(adminShell('/admin', 'Overview', body));
-});
-
-// ---------- /admin/submissions (Submissions table) -----------------------
-app.get('/admin/submissions', basicAuth, (_req, res) => {
+app.get('/admin', basicAuth, (_req, res) => {
   const rows = db.prepare(`
     SELECT * FROM submissions ORDER BY id DESC LIMIT 200
   `).all();
   const fmt = (n) => n ? '✓' : '·';
-  const tableHtml = rows.length === 0 ? '<div class="empty">No submissions yet.</div>' : `
-    <table>
-      <thead><tr>
-        <th>ID</th><th>When</th><th>Type</th><th>Name</th><th>Business</th><th>Contact</th>
-        <th>Presence</th><th>Idea</th><th>Em</th><th>Sl</th><th>SMS</th><th>Cf</th><th>Hs</th>
-      </tr></thead>
-      <tbody>
-      ${rows.map(r => `
-        <tr>
-          <td>${r.id}</td>
-          <td class="muted">${r.created_at}</td>
-          <td>${r.type}</td>
-          <td>${escape(r.name || '')}</td>
-          <td>${escape(r.business || '')}</td>
-          <td>${escape(r.email || '')}<br><span class="muted">${escape(r.phone || '')}</span></td>
-          <td>${escape(PRESENCE_LABEL[r.package] || r.package || '')}</td>
-          <td><details><summary>${escape((r.message || '').slice(0, 60))}${(r.message || '').length > 60 ? '…' : ''}</summary><pre>${escape(r.message || '')}</pre></details></td>
-          <td class="${r.email_sent ? 'ok' : 'fail'}" title="${escape(r.email_last_error || '')}">${fmt(r.email_sent)}${r.email_attempts > 1 ? ` (${r.email_attempts})` : ''}</td>
-          <td class="${r.slack_sent ? 'ok' : 'muted'}">${fmt(r.slack_sent)}</td>
-          <td class="${r.sms_sent ? 'ok' : 'muted'}">${fmt(r.sms_sent)}</td>
-          <td class="${r.confirmation_sent ? 'ok' : 'muted'}">${fmt(r.confirmation_sent)}</td>
-          <td class="${r.hubspot_synced ? 'ok' : 'muted'}" title="${escape(r.hubspot_contact_id || '')}">${fmt(r.hubspot_synced)}</td>
-        </tr>`).join('')}
-      </tbody>
-    </table>`;
-  const body = `
-    <h1>Submissions <span class="muted" style="font-weight:400; font-size:14px;">(${rows.length})</span></h1>
-    <p class="subtitle">Every inquiry the contact form has received, newest first. Em/Sl/SMS/Cf/Hs columns mark delivery to email, Slack, SMS, confirmation reply, and HubSpot.</p>
-    <div class="panel" style="padding:0; overflow:hidden;">${tableHtml}</div>
-  `;
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Reach Screens Submissions</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a1628; color: #e6ecf5; margin: 0; padding: 24px; }
+  h1 { margin: 0 0 16px; font-size: 22px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.1); vertical-align: top; }
+  th { background: rgba(255,255,255,0.05); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; font-size: 11px; }
+  tr:hover { background: rgba(92,224,210,0.05); }
+  .ok { color: #5CE0D2; }
+  .fail { color: #ff6b6b; }
+  .muted { color: #6b7890; }
+  details { margin: 0; }
+  summary { cursor: pointer; }
+  pre { white-space: pre-wrap; background: rgba(255,255,255,0.04); padding: 8px; border-radius: 6px; font-size: 12px; max-width: 500px; }
+</style>
+</head><body>
+<h1>Reach Screens — Submissions <span class="muted">(${rows.length})</span></h1>
+<table>
+<thead><tr>
+<th>ID</th><th>When</th><th>Type</th><th>Name</th><th>Business</th><th>Contact</th>
+<th>Presence</th><th>Idea</th><th>Em</th><th>Sl</th><th>SMS</th><th>Cf</th><th>Hs</th>
+</tr></thead><tbody>
+${rows.map(r => `
+<tr>
+  <td>${r.id}</td>
+  <td class="muted">${r.created_at}</td>
+  <td>${r.type}</td>
+  <td>${escape(r.name || '')}</td>
+  <td>${escape(r.business || '')}</td>
+  <td>${escape(r.email || '')}<br><span class="muted">${escape(r.phone || '')}</span></td>
+  <td>${escape(PRESENCE_LABEL[r.package] || r.package || '')}</td>
+  <td><details><summary>${escape((r.message || '').slice(0, 60))}${(r.message || '').length > 60 ? '…' : ''}</summary><pre>${escape(r.message || '')}</pre></details></td>
+  <td class="${r.email_sent ? 'ok' : 'fail'}" title="${escape(r.email_last_error || '')}">${fmt(r.email_sent)}${r.email_attempts > 1 ? ` (${r.email_attempts})` : ''}</td>
+  <td class="${r.slack_sent ? 'ok' : 'muted'}">${fmt(r.slack_sent)}</td>
+  <td class="${r.sms_sent ? 'ok' : 'muted'}">${fmt(r.sms_sent)}</td>
+  <td class="${r.confirmation_sent ? 'ok' : 'muted'}">${fmt(r.confirmation_sent)}</td>
+  <td class="${r.hubspot_synced ? 'ok' : 'muted'}" title="${escape(r.hubspot_contact_id || '')}">${fmt(r.hubspot_synced)}</td>
+</tr>`).join('')}
+</tbody></table>
+</body></html>`;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(adminShell('/admin/submissions', 'Submissions', body));
-});
-
-// ---------- /admin/analytics (Analytics) ---------------------------------
-app.get('/admin/analytics', basicAuth, (req, res) => {
-  const { key: rangeKey, days } = rangeFromQuery(req.query);
-  const rows = eventsInRange(days);
-
-  const pageviews = rows.filter(r => r.event_type === 'pageview');
-  const clicks = rows.filter(r => r.event_type === 'click');
-  const scrolls = rows.filter(r => r.event_type === 'scroll_depth');
-  const dwells = rows.filter(r => r.event_type === 'section_dwell');
-
-  // Top pages by pageview
-  const pageCounts = new Map();
-  for (const r of pageviews) {
-    const k = r.path || '/';
-    pageCounts.set(k, (pageCounts.get(k) || 0) + 1);
-  }
-  const topPages = [...pageCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
-
-  // Top buttons / clicked elements
-  const topClicks = topByLabel(clicks, 'click', 12);
-
-  // Scroll-depth distribution (count of sessions that hit each milestone)
-  const milestones = [25, 50, 75, 100];
-  const reachedBy = milestones.map(m => {
-    const sessions = new Set();
-    for (const r of scrolls) {
-      if ((r.value || 0) >= m) sessions.add(r.session_id || '');
-    }
-    return [m + '%', sessions.size];
-  });
-
-  // Section dwell time — sum of seconds per label
-  const dwellTotals = new Map();
-  const dwellCounts = new Map();
-  for (const r of dwells) {
-    const k = r.label || '(unknown)';
-    dwellTotals.set(k, (dwellTotals.get(k) || 0) + (r.value || 0));
-    dwellCounts.set(k, (dwellCounts.get(k) || 0) + 1);
-  }
-  const topDwell = [...dwellTotals.entries()]
-    .map(([k, totalSec]) => {
-      const sessions = dwellCounts.get(k) || 1;
-      const avg = totalSec / sessions;
-      return [`${k}  ·  ${avg.toFixed(1)}s avg`, Math.round(totalSec)];
-    })
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-
-  // Device split
-  const devices = new Map();
-  for (const r of pageviews) {
-    const k = r.device || 'unknown';
-    devices.set(k, (devices.get(k) || 0) + 1);
-  }
-  const deviceList = [...devices.entries()].sort((a, b) => b[1] - a[1]);
-
-  // Referrers
-  const refs = new Map();
-  for (const r of pageviews) {
-    let k = (r.referrer || 'direct').replace(/^https?:\/\//, '').split('/')[0] || 'direct';
-    if (k.includes('reachscreens')) k = '(internal)';
-    refs.set(k, (refs.get(k) || 0) + 1);
-  }
-  const topRefs = [...refs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
-
-  const dailyPV = bucketByDay(pageviews, days);
-
-  const body = `
-    <h1>Analytics</h1>
-    <p class="subtitle">Pageviews, clicks, scroll depth, and where people are spending their time on the live site.</p>
-    ${rangeBar(rangeKey)}
-    <div class="cards">
-      <div class="card"><p class="card-label">Pageviews</p><p class="card-value">${pageviews.length.toLocaleString()}</p></div>
-      <div class="card"><p class="card-label">Sessions</p><p class="card-value">${new Set(rows.map(r => r.session_id).filter(Boolean)).size.toLocaleString()}</p></div>
-      <div class="card"><p class="card-label">Clicks tracked</p><p class="card-value">${clicks.length.toLocaleString()}</p></div>
-      <div class="card"><p class="card-label">Reached 75% scroll</p><p class="card-value">${reachedBy[2]?.[1]?.toLocaleString() || 0}</p><p class="card-sub">distinct sessions</p></div>
-    </div>
-    <div class="panel">
-      <h3>Pageviews per day</h3>
-      ${sparkline(dailyPV)}
-    </div>
-    <div class="grid-2">
-      <div class="panel">
-        <h3>Top pages</h3>
-        ${barListHtml(topPages)}
-      </div>
-      <div class="panel">
-        <h3>Most-clicked buttons &amp; links</h3>
-        ${barListHtml(topClicks)}
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="panel">
-        <h3>Scroll depth — distinct sessions reaching</h3>
-        ${barListHtml(reachedBy)}
-      </div>
-      <div class="panel">
-        <h3>Section dwell time (total seconds, with avg per visit)</h3>
-        ${barListHtml(topDwell)}
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="panel">
-        <h3>Devices</h3>
-        ${barListHtml(deviceList)}
-      </div>
-      <div class="panel">
-        <h3>Referrers</h3>
-        ${barListHtml(topRefs)}
-      </div>
-    </div>
-  `;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(adminShell('/admin/analytics', 'Analytics', body));
-});
-
-// ---------- /admin/sessions (per-session timelines) ----------------------
-app.get('/admin/sessions', basicAuth, (req, res) => {
-  const { key: rangeKey, days } = rangeFromQuery(req.query);
-  const rows = eventsInRange(days);
-  const bySession = new Map();
-  for (const r of rows) {
-    if (!r.session_id) continue;
-    if (!bySession.has(r.session_id)) bySession.set(r.session_id, []);
-    bySession.get(r.session_id).push(r);
-  }
-  // Newest sessions first, by latest event timestamp
-  const sessions = [...bySession.entries()].map(([sid, evs]) => {
-    evs.sort((a, b) => (a.ts > b.ts ? 1 : -1));
-    return {
-      sid,
-      start: evs[0].ts,
-      end: evs[evs.length - 1].ts,
-      events: evs,
-      device: evs[0].device,
-      referrer: evs[0].referrer,
-      pageviews: evs.filter(e => e.event_type === 'pageview').length,
-      clicks: evs.filter(e => e.event_type === 'click').length,
-      maxScroll: Math.max(0, ...evs.filter(e => e.event_type === 'scroll_depth').map(e => e.value || 0)),
-    };
-  }).sort((a, b) => (a.end < b.end ? 1 : -1)).slice(0, 60);
-
-  const list = sessions.length === 0 ? '<div class="empty">No sessions in this range yet.</div>' : sessions.map(s => `
-    <details class="panel" style="margin-bottom:10px;">
-      <summary style="cursor:pointer; display:flex; gap:18px; flex-wrap:wrap; align-items:center; font-size:13px;">
-        <span class="dim">${escape(s.start)}</span>
-        <span class="pill">${escape(s.device || 'unknown')}</span>
-        <span>${s.pageviews} PV · ${s.clicks} clicks · max ${s.maxScroll}% scroll</span>
-        <span class="dim">ref: ${escape((s.referrer || 'direct').replace(/^https?:\/\//, ''))}</span>
-        <span class="dim" style="margin-left:auto;">${escape(s.sid.slice(0, 10))}…</span>
-      </summary>
-      <table style="margin-top:14px;">
-        <thead><tr><th>Time</th><th>Event</th><th>Path</th><th>Label</th><th>Value</th></tr></thead>
-        <tbody>
-        ${s.events.map(e => `
-          <tr>
-            <td class="muted">${escape(e.ts)}</td>
-            <td>${escape(e.event_type)}</td>
-            <td>${escape(e.path || '')}</td>
-            <td>${escape(e.label || '')}</td>
-            <td class="muted">${e.value == null ? '' : e.value}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>
-    </details>
-  `).join('');
-
-  const body = `
-    <h1>Sessions</h1>
-    <p class="subtitle">Each row is one visitor session — expand to see the event-by-event trail of what they did on the site.</p>
-    ${rangeBar(rangeKey)}
-    ${list}
-  `;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(adminShell('/admin/sessions', 'Sessions', body));
+  res.send(html);
 });
 
 function escape(s) {
