@@ -164,6 +164,9 @@ app.use((req, res, next) => {
 });
 
 // ---------- Health --------------------------------------------------------
+// GET / is the Coolify healthcheck — must return 200.
+app.get('/', (_req, res) => res.send('forms-api ok'));
+
 app.get('/health', (_req, res) => {
   const counts = db.prepare(`
     SELECT
