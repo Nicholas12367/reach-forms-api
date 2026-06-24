@@ -1099,6 +1099,17 @@ app.post('/admin/hubspot-mark-synced', basicAuth, (req, res) => {
   res.json({ ok: true, updated: result.changes, id, contact_id: contactId });
 });
 
+// ---------- /admin/api/submissions (protected) — read-only JSON feed for reach-admin CRM import ----------
+app.get('/admin/api/submissions', basicAuth, (req, res) => {
+  const sinceId = parseInt(req.query.since_id, 10) || 0;
+  const limit = Math.min(2000, parseInt(req.query.limit, 10) || 1000);
+  const rows = db.prepare(`
+    SELECT id, created_at, type, name, business, email, phone, package, locations, venue, address, message
+    FROM submissions WHERE id > ? ORDER BY id ASC LIMIT ?
+  `).all(sinceId, limit);
+  res.json({ ok: true, count: rows.length, submissions: rows });
+});
+
 // ---------- /admin/retry (protected) — retry pending email sends ---------
 app.post('/admin/retry', basicAuth, async (_req, res) => {
   const pending = db.prepare(`SELECT * FROM submissions WHERE email_sent = 0 ORDER BY id DESC LIMIT 50`).all();
