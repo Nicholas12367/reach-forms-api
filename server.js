@@ -29,6 +29,14 @@ import { Resend } from 'resend';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { timingSafeEqual } from 'node:crypto';
+
+// Constant-time string compare, so admin-credential checks don't leak length/
+// content via timing. Mismatched lengths short-circuit (still constant per length).
+const safeEqual = (a, b) => {
+  const A = Buffer.from(String(a)), B = Buffer.from(String(b));
+  return A.length === B.length && timingSafeEqual(A, B);
+};
 
 const app = express();
 app.use(express.json({ limit: '32kb' }));
@@ -127,6 +135,17 @@ function rateLimitOk(ip) {
   const count = (rlBuckets.get(ip) || 0) + 1;
   rlBuckets.set(ip, count);
   return count <= 60;
+}
+
+// Separate, stricter limit for /submit — each submission fires email/SMS/HubSpot,
+// so it's a cost/abuse vector. Generous for humans (nobody submits 8 forms/min),
+// tight on spam. Kept apart from the /track bucket so page analytics can't use it up.
+const submitBuckets = new Map();
+setInterval(() => submitBuckets.clear(), 60000).unref?.();
+function submitRateOk(ip) {
+  const count = (submitBuckets.get(ip) || 0) + 1;
+  submitBuckets.set(ip, count);
+  return count <= 8;
 }
 
 const insertStmt = db.prepare(`
@@ -521,6 +540,11 @@ app.post('/submit', async (req, res) => {
     const body = req.body || {};
     if (clean(body._hp)) return res.json({ ok: true }); // honeypot trap
 
+    // Per-client throttle (each submission fans out to email/SMS/HubSpot).
+    if (!submitRateOk(hashIp(clientIp(req)) || 'unknown')) {
+      return res.status(429).json({ ok: false, error: 'Too many submissions — please wait a minute and try again.' });
+    }
+
     const data = {
       type: body.type === 'host' ? 'host' : 'advertise',
       name: clean(body.name, 200),
@@ -650,8 +674,9 @@ function basicAuth(req, res, next) {
     res.set('WWW-Authenticate', 'Basic realm="Reach Screens Admin"');
     return res.status(401).send('Authentication required.');
   }
-  const [user, pass] = Buffer.from(header.slice(6), 'base64').toString('utf8').split(':');
-  if (user !== adminUser || pass !== adminPass) {
+  const sep = (s) => { const i = s.indexOf(':'); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)]; };
+  const [user, pass] = sep(Buffer.from(header.slice(6), 'base64').toString('utf8'));
+  if (!safeEqual(user, adminUser) || !safeEqual(pass, adminPass)) {
     res.set('WWW-Authenticate', 'Basic realm="Reach Screens Admin"');
     return res.status(401).send('Invalid credentials.');
   }
