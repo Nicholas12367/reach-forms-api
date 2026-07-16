@@ -74,6 +74,10 @@ db.exec(`
 // Lightweight migrations for older deployments that already have the table:
 try { db.exec(`ALTER TABLE submissions ADD COLUMN hubspot_synced INTEGER DEFAULT 0`); } catch {}
 try { db.exec(`ALTER TABLE submissions ADD COLUMN hubspot_contact_id TEXT`); } catch {}
+// Ad attribution columns (which ad brought this lead). Safe on existing tables.
+for (const col of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'ad_attribution', 'ad_landing']) {
+  try { db.exec(`ALTER TABLE submissions ADD COLUMN ${col} TEXT`); } catch {}
+}
 
 // ---------- Analytics events table (reachscreens.ca only) ----------------
 db.exec(`
@@ -149,8 +153,9 @@ function submitRateOk(ip) {
 }
 
 const insertStmt = db.prepare(`
-  INSERT INTO submissions (type, name, business, email, phone, package, locations, venue, address, message)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO submissions (type, name, business, email, phone, package, locations, venue, address, message,
+    utm_source, utm_medium, utm_campaign, utm_content, utm_term, fbclid, ad_attribution, ad_landing)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const updateDeliveryStmt = db.prepare(`
   UPDATE submissions SET
@@ -233,6 +238,8 @@ function formatBody(row) {
     row.business && `Business: ${row.business}`,
     `Email: ${row.email}`,
     row.phone && `Phone: ${row.phone}`,
+    row.ad_attribution && `Came from ad: ${row.ad_attribution}`,
+    (row.utm_campaign || row.utm_content) && `  (campaign: ${row.utm_campaign || '—'} · ad set: ${row.utm_content || '—'} · ad: ${row.utm_term || '—'})`,
     presence && `Presence preference: ${presence}`,
     row.locations && `Selected location IDs: ${row.locations}`,
     row.venue && `Venue type: ${row.venue}`,
@@ -508,6 +515,7 @@ async function sendHubspot(row) {
       `<p><strong>Inquiry type:</strong> ${row.type === 'host' ? 'Wants to host a screen' : 'Wants to advertise'}</p>`,
     ];
     if (presence) lines.push(`<p><strong>Presence preference:</strong> ${htmlEscape(presence)}</p>`);
+    if (row.ad_attribution) lines.push(`<p><strong>Came from ad:</strong> ${htmlEscape(row.ad_attribution)}</p>`);
     if (row.locations) lines.push(`<p><strong>Selected location IDs:</strong> ${htmlEscape(row.locations)}</p>`);
     if (row.venue) lines.push(`<p><strong>Venue type:</strong> ${htmlEscape(row.venue)}</p>`);
     if (row.address) lines.push(`<p><strong>Business address:</strong> ${htmlEscape(row.address)}</p>`);
@@ -556,6 +564,15 @@ app.post('/submit', async (req, res) => {
       venue: clean(body.venue, 200),
       address: clean(body.address, 300),
       message: clean(body.message, 5000),
+      // Ad attribution (populated by rs-attribution.js on the site).
+      utm_source: clean(body.utm_source, 200),
+      utm_medium: clean(body.utm_medium, 200),
+      utm_campaign: clean(body.utm_campaign, 200),
+      utm_content: clean(body.utm_content, 200),
+      utm_term: clean(body.utm_term, 200),
+      fbclid: clean(body.fbclid, 300),
+      ad_attribution: clean(body.attribution, 400),
+      ad_landing: clean(body.ad_landing, 500),
     };
 
     if (!data.name || !isEmail(data.email) || !data.message) {
@@ -566,6 +583,8 @@ app.post('/submit', async (req, res) => {
     const info = insertStmt.run(
       data.type, data.name, data.business, data.email, data.phone,
       data.package, data.locations, data.venue, data.address, data.message,
+      data.utm_source, data.utm_medium, data.utm_campaign, data.utm_content, data.utm_term,
+      data.fbclid, data.ad_attribution, data.ad_landing,
     );
     const row = { id: info.lastInsertRowid, ...data };
 
@@ -902,7 +921,7 @@ app.get('/admin/submissions', basicAuth, (_req, res) => {
       <table>
         <thead><tr>
           <th>ID</th><th>When</th><th>Type</th><th>Name</th><th>Business</th><th>Contact</th>
-          <th>Presence</th><th>Idea</th><th>Em</th><th>Sl</th><th>SMS</th><th>Cf</th><th>Hs</th>
+          <th>Ad source</th><th>Presence</th><th>Idea</th><th>Em</th><th>Sl</th><th>SMS</th><th>Cf</th><th>Hs</th>
         </tr></thead>
         <tbody>
         ${rows.map(r => `
@@ -913,6 +932,7 @@ app.get('/admin/submissions', basicAuth, (_req, res) => {
             <td>${escape(r.name || '')}</td>
             <td>${escape(r.business || '')}</td>
             <td>${escape(r.email || '')}<br><span class="muted">${escape(r.phone || '')}</span></td>
+            <td>${r.ad_attribution ? `<span class="pill">${escape(r.ad_attribution)}</span>` : '<span class="dim">—</span>'}</td>
             <td>${escape(PRESENCE_LABEL[r.package] || r.package || '')}</td>
             <td><details><summary>${escape((r.message || '').slice(0, 60))}${(r.message || '').length > 60 ? '…' : ''}</summary><pre>${escape(r.message || '')}</pre></details></td>
             <td class="${r.email_sent ? 'ok' : 'fail'}" title="${escape(r.email_last_error || '')}">${fmt(r.email_sent)}${r.email_attempts > 1 ? ` (${r.email_attempts})` : ''}</td>
@@ -1129,7 +1149,8 @@ app.get('/admin/api/submissions', basicAuth, (req, res) => {
   const sinceId = parseInt(req.query.since_id, 10) || 0;
   const limit = Math.min(2000, parseInt(req.query.limit, 10) || 1000);
   const rows = db.prepare(`
-    SELECT id, created_at, type, name, business, email, phone, package, locations, venue, address, message
+    SELECT id, created_at, type, name, business, email, phone, package, locations, venue, address, message,
+           utm_source, utm_medium, utm_campaign, utm_content, utm_term, fbclid, ad_attribution, ad_landing
     FROM submissions WHERE id > ? ORDER BY id ASC LIMIT ?
   `).all(sinceId, limit);
   res.json({ ok: true, count: rows.length, submissions: rows });
